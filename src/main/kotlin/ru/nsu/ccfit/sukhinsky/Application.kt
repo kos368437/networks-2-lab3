@@ -7,10 +7,7 @@ import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.serialization.kotlinx.json.*
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.async
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import kotlinx.coroutines.selects.select
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -195,14 +192,14 @@ suspend fun main() {
     val reader = Scanner(System.`in`)
 
     val geopositionRequest: Deferred<Geopoints>
-    val weatherRequest: Deferred<Weather>
-    val interestingPlacesRequest: Deferred<List<InterestingPlace>>
-    var descriptionPlacesRequest : List<Pair<InterestingPlace, Deferred<PlaceDescription>>>
+    var weatherRequest: Deferred<Weather>
+    var interestingPlacesRequest: Deferred<List<InterestingPlace>>
+    val weatherAndPlacesRequest: Deferred<Pair<Weather, List<Pair<InterestingPlace, PlaceDescription>>>>
 
     print("Enter the name of the place: ")
-    val enteredPlaceName:String = reader.nextLine()
+    val enteredPlaceName: String = reader.nextLine()
 
-    val client = HttpClient(CIO)    {
+    val client = HttpClient(CIO) {
         install(ContentNegotiation) {
             json(Json {
                 prettyPrint = true
@@ -224,64 +221,84 @@ suspend fun main() {
         }
     }
 
-    val variantsOfEnteredPlace : Geopoints = geopositionRequest.await()
+    val variantsOfEnteredPlace: Geopoints = geopositionRequest.await()
     variantsOfEnteredPlace.hits.forEachIndexed { ind: Int, elem ->
         println("$ind: ${elem.name}, ${elem.country}, ${elem.state}, ${elem.city}, ${elem.street}")
     }
 
     print("Choose one variant: ")
-    val userPlaceChoiceInd:Int = reader.nextInt()
-    val userPlaceChoice:Hit = variantsOfEnteredPlace.hits[userPlaceChoiceInd]
+    val userPlaceChoiceInd: Int = reader.nextInt()
+    val userPlaceChoice: Hit = variantsOfEnteredPlace.hits[userPlaceChoiceInd]
 
-    println("${userPlaceChoice.name}, ${userPlaceChoice.country}, ${userPlaceChoice.state}, " +
-            "${userPlaceChoice.city}, ${userPlaceChoice.street}")
+    println(
+        "${userPlaceChoice.name}, ${userPlaceChoice.country}, ${userPlaceChoice.state}, " +
+                "${userPlaceChoice.city}, ${userPlaceChoice.street}"
+    )
 
-    runBlocking {
-        weatherRequest = async {
-            client.get("http://api.openweathermap.org/data/2.5/weather") {
-                url {
-                    parameters.append("appid", "92a7ee2fa20f5ddcf18beb4d1d6bf118")
-                    parameters.append("units", "metric")
-                    parameters.append("lang", "ru")
-                    parameters.append("lat", userPlaceChoice.point.lat.toString())
-                    parameters.append("lon", userPlaceChoice.point.lng.toString())
-                }
-            }.body()
-        }
-
-        interestingPlacesRequest = async {
-            client.get("https://api.opentripmap.com/0.1/ru/places/radius") {
-                url {
-                    parameters.append("apikey", "5ae2e3f221c38a28845f05b61d8383bf6da06b5a9369d71ec66251b9")
-                    parameters.append("radius", "2000")
-                    parameters.append("lat", userPlaceChoice.point.lat.toString())
-                    parameters.append("lon", userPlaceChoice.point.lng.toString())
-                    parameters.append("format", "json")
-                }
-            }.body()
-        }
-
-        descriptionPlacesRequest = select {
-            interestingPlacesRequest.onAwait { places ->
-                var placeDescription: Deferred<PlaceDescription>
-                val placeDescriptionList: LinkedList<Pair<InterestingPlace, Deferred<PlaceDescription>>> = LinkedList()
-                places.forEach { place: InterestingPlace ->
-                    placeDescription = async {
-                        client.get("https://api.opentripmap.com/0.1/ru/places/xid/" + place.xid) {
-                            url {
-                                parameters.append("apikey", "5ae2e3f221c38a28845f05b61d8383bf6da06b5a9369d71ec66251b9")
-                            }
-                        }.body()
+    weatherAndPlacesRequest = GlobalScope.async {
+            weatherRequest = async {
+                client.get("http://api.openweathermap.org/data/2.5/weather") {
+                    url {
+                        parameters.append("appid", "92a7ee2fa20f5ddcf18beb4d1d6bf118")
+                        parameters.append("units", "metric")
+                        parameters.append("lang", "ru")
+                        parameters.append("lat", userPlaceChoice.point.lat.toString())
+                        parameters.append("lon", userPlaceChoice.point.lng.toString())
                     }
-                    placeDescriptionList.addLast(Pair(place, placeDescription))
-                }
-                return@onAwait placeDescriptionList
+                }.body()
             }
+
+            interestingPlacesRequest = async {
+                client.get("https://api.opentripmap.com/0.1/ru/places/radius") {
+                    url {
+                        parameters.append("apikey", "5ae2e3f221c38a28845f05b61d8383bf6da06b5a9369d71ec66251b9")
+                        parameters.append("radius", "2000")
+                        parameters.append("lat", userPlaceChoice.point.lat.toString())
+                        parameters.append("lon", userPlaceChoice.point.lng.toString())
+                        parameters.append("format", "json")
+                    }
+                }.body()
+            }
+
+            val placesAndDescriptionsRequest = async {
+                select {
+                    interestingPlacesRequest.onAwait { places ->
+                        var placeDescription: Deferred<PlaceDescription>
+                        val placeDescriptionList: LinkedList<Pair<InterestingPlace, Deferred<PlaceDescription>>> =
+                            LinkedList()
+                        places.forEach { place: InterestingPlace ->
+                            placeDescription = async {
+                                client.get("https://api.opentripmap.com/0.1/en/places/xid/" + place.xid) {
+                                    url {
+                                        parameters.append(
+                                            "apikey",
+                                            "5ae2e3f221c38a28845f05b61d8383bf6da06b5a9369d71ec66251b9"
+                                        )
+                                    }
+                                }.body()
+                            }
+                            placeDescriptionList.addLast(Pair(place, placeDescription))
+                        }
+                        return@onAwait placeDescriptionList
+                    }
+                }
+            }
+            val weather: Weather = weatherRequest.await()
+            val placesAndDescriptions = placesAndDescriptionsRequest.await().flatMap { pair ->
+                val res = LinkedList<Pair<InterestingPlace, PlaceDescription>>(); res.addLast(
+                Pair(
+                    pair.first,
+                    pair.second.await()
+                )
+            ); res
+            }
+            Pair(weather, placesAndDescriptions)
         }
-    }
 
+    val weatherAndPlaces = weatherAndPlacesRequest.await()
+    val weather = weatherAndPlaces.first
+    val placesWithDescription = weatherAndPlaces.second
 
-    val weather : Weather = weatherRequest.await()
     println("\n ///////////////////// WEATHER ///////////////////")
     println("Temperature: ${weather.main.temp}°C")
     println("Feels like: ${weather.main.feels_like}°C")
@@ -295,11 +312,11 @@ suspend fun main() {
     println("\n /////////////////////// INTERESTING PLACES NEARBY ////////////////////")
 
     runBlocking {
-        descriptionPlacesRequest.forEach { pair ->
+        placesWithDescription.forEach { pair ->
             launch {
                 val place = pair.first
                 val placeLine = place.name + ": " + place.kinds
-                val descr = pair.second.await()
+                val descr = pair.second
                 val descrLine = descr.info.descr
                 var outLine = placeLine
                 if (descrLine.isNotEmpty()) {
